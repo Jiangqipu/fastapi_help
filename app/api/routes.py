@@ -129,7 +129,21 @@ async def create_travel_plan(
                 "constraint_summary": None,
                 "preference_breakdown": [],
                 "preference_score": None,
-                "preference_summary": None
+                "preference_summary": None,
+                "location_candidates": {},
+                "resolved_locations": {},
+                "commute_estimates": [],
+                "commute_summary": None,
+                "transport_candidates": [],
+                "transport_plan_summary": None,
+                "transfer_segments": [],
+                "transfer_summary": None,
+                "risk_factors": {},
+                "buffer_plan": {},
+                "multi_plan_options": [],
+                "multi_plan_summary": None,
+                "missing_slots_by_level": {},
+                "ambiguity_questions": []
             }
         else:
             # 更新用户输入
@@ -143,6 +157,20 @@ async def create_travel_plan(
             state.setdefault("preference_breakdown", [])
             state.setdefault("preference_score", None)
             state.setdefault("preference_summary", None)
+            state.setdefault("location_candidates", {})
+            state.setdefault("resolved_locations", {})
+            state.setdefault("commute_estimates", [])
+            state.setdefault("commute_summary", None)
+            state.setdefault("transport_candidates", [])
+            state.setdefault("transport_plan_summary", None)
+            state.setdefault("transfer_segments", [])
+            state.setdefault("transfer_summary", None)
+            state.setdefault("risk_factors", {})
+            state.setdefault("buffer_plan", {})
+            state.setdefault("multi_plan_options", [])
+            state.setdefault("multi_plan_summary", None)
+            state.setdefault("missing_slots_by_level", {})
+            state.setdefault("ambiguity_questions", [])
         
         # 添加动态指令（如果提供）
         if request.dynamic_instructions:

@@ -26,9 +26,28 @@ from app.utils.time_window import (
     evaluate_soft_preferences,
     build_preference_summary,
 )
+from app.utils.commute import (
+    build_commute_estimates,
+    summarize_commute,
+)
+from app.utils.transport_planner import (
+    extract_transport_candidates,
+    evaluate_candidates,
+    build_plan_summary,
+)
+from app.utils.transfer_planner import (
+    build_transfer_segments,
+    summarize_transfers,
+)
+from app.utils.risk_manager import build_risk_profile, build_buffer_plan
+from app.utils.slot_helpers import classify_missing_slots, detect_relative_time_ambiguity
 from app.utils.constraint_parser import (
     merge_constraint_records,
     parse_time_constraints,
+)
+from app.utils.location_parser import (
+    extract_location_candidates,
+    select_primary_location,
 )
 
 logger = logging.getLogger(__name__)
@@ -214,6 +233,54 @@ async def initial_input_node(state: GraphState) -> GraphState:
         logger.info(f"解析到 {len(parsed_soft)} 条软性时间偏好")
     else:
         state.setdefault("soft_time_preferences", soft_preferences)
+
+    location_candidates = extract_location_candidates(user_input)
+    if location_candidates:
+        state_locations = state.get("location_candidates", {})
+        for key, values in location_candidates.items():
+            existing = state_locations.get(key, [])
+            text_index = {item["text"]: item for item in existing}
+            for candidate in values:
+                text = candidate["text"]
+                if text in text_index:
+                    if candidate["confidence"] > text_index[text].get("confidence", 0):
+                        text_index[text].update(candidate)
+                else:
+                    existing.append(candidate)
+                    text_index[text] = candidate
+            state_locations[key] = existing
+        state["location_candidates"] = state_locations
+
+        resolved = state.get("resolved_locations", {})
+        if "origin" not in resolved:
+            best_origin = select_primary_location(state_locations, "other")
+            if best_origin:
+                resolved["origin"] = best_origin
+        if "destination" not in resolved:
+            best_dest = select_primary_location(
+                {"destination": state_locations.get("destination", [])},
+                "origin",
+            )
+            if best_dest:
+                resolved["destination"] = best_dest
+        state["resolved_locations"] = resolved
+
+        ambiguity_questions = state.get("ambiguity_questions", [])
+        if len(location_candidates.get("destination", [])) > 1:
+            dests = ", ".join(c["text"] for c in location_candidates["destination"][:4])
+            question = f"检测到多个目的地候选（{dests}），请明确要前往的具体地点。"
+            if question not in ambiguity_questions:
+                ambiguity_questions.append(question)
+        if len(location_candidates.get("origin", [])) > 1:
+            origins = ", ".join(c["text"] for c in location_candidates["origin"][:4])
+            question = f"检测到多个出发地候选（{origins}），请确认实际出发地。"
+            if question not in ambiguity_questions:
+                ambiguity_questions.append(question)
+        time_questions = detect_relative_time_ambiguity(user_input)
+        for question in time_questions:
+            if question not in ambiguity_questions:
+                ambiguity_questions.append(question)
+        state["ambiguity_questions"] = ambiguity_questions
     
     logger.info(f"用户输入已接收：user_id={user_id}, input={user_input[:50]}...")
     return state
@@ -281,6 +348,8 @@ async def slot_validation_node(
         # 更新状态
         state["is_slots_complete"] = validation_result.get("is_valid", False)
         state["missing_slots"] = validation_result.get("missing_fields", [])
+        classified = classify_missing_slots(state["missing_slots"])
+        state["missing_slots_by_level"] = classified
         state["validation_result"] = validation_result
         
         logger.info(f"槽位校验结果：is_complete={state['is_slots_complete']}, missing={state['missing_slots']}")
@@ -313,8 +382,31 @@ async def time_constraint_node(
             await storage.save_state(state["user_id"], state)
             return state
 
+        resolved_locations = state.get("resolved_locations", {})
+        commute_plans = []
+        risk_context = state.get("risk_factors", {})
+        if not risk_context:
+            risk_context = build_risk_profile(state.get("current_slots", {}), state.get("commute_estimates"))
+            state["risk_factors"] = risk_context
+        if resolved_locations:
+            commute_plans = build_commute_estimates(
+                resolved_locations,
+                importance=state.get("preference_score") or 0.5,
+                risk_context=risk_context,
+            )
+            state["commute_estimates"] = commute_plans
+            state["commute_summary"] = summarize_commute(commute_plans)
+            state["buffer_plan"] = build_buffer_plan(commute_plans, risk_context)
+        else:
+            state.setdefault("commute_estimates", [])
+            state.setdefault("commute_summary", "尚未生成通勤估算。")
+            state.setdefault("buffer_plan", {})
+
         tool_results = state.get("tool_results", {})
         timing_stats = extract_tool_time_stats(tool_results)
+        if not timing_stats.get("avg_duration_minutes") and commute_plans:
+            avg_commute = sum(plan["total_minutes"] for plan in commute_plans) / len(commute_plans)
+            timing_stats["avg_duration_minutes"] = avg_commute
 
         normalized, violations = normalize_time_constraints(constraints)
         normalized, propagation_violations = apply_schedule_propagation(
@@ -374,6 +466,55 @@ async def preference_scoring_node(
         return state
 
 
+async def transport_planning_node(
+    state: GraphState,
+    storage: RedisStorage
+) -> GraphState:
+    """交通方案筛选与评分"""
+    try:
+        if state.get("constraint_violation"):
+            state["transport_candidates"] = []
+            state["transport_plan_summary"] = "由于硬性时间约束不可行，交通方案被跳过。"
+            await storage.save_state(state["user_id"], state)
+            return state
+
+        tool_results = state.get("tool_results", {})
+        candidates = extract_transport_candidates(tool_results)
+        normalized_constraints = state.get("normalized_time_constraints", [])
+        commute_estimates = state.get("commute_estimates", [])
+        slots = state.get("current_slots", {})
+
+        if not candidates:
+            state["transport_candidates"] = []
+            state["transport_plan_summary"] = "工具结果中没有识别出可评估的交通方案。"
+            await storage.save_state(state["user_id"], state)
+            return state
+
+        feasible, infeasible = evaluate_candidates(
+            candidates, normalized_constraints, commute_estimates, slots
+        )
+
+        plan_summary = build_plan_summary(feasible, infeasible)
+        best_plan = feasible[0] if feasible else None
+        transfer_segments = build_transfer_segments(best_plan, state.get("resolved_locations", {}))
+        transfer_summary = summarize_transfers(transfer_segments)
+        plan_variants = build_plan_variants(feasible)
+        multi_plan_summary = summarize_plan_variants(plan_variants)
+
+        state["transport_candidates"] = feasible
+        state["transport_plan_summary"] = plan_summary
+        state["transfer_segments"] = transfer_segments
+        state["transfer_summary"] = transfer_summary
+        state["multi_plan_options"] = plan_variants
+        state["multi_plan_summary"] = multi_plan_summary
+        await storage.save_state(state["user_id"], state)
+        return state
+
+    except Exception as e:
+        logger.error(f"交通方案评估失败：{str(e)}", exc_info=True)
+        return state
+
+
 async def user_refinement_node(
     state: GraphState,
     llm1: BaseChatModel,
@@ -381,10 +522,16 @@ async def user_refinement_node(
 ) -> GraphState:
     """用户交互提示节点：生成友好提示，等待用户补充信息"""
     try:
-        missing_slots = state.get("missing_slots", [])
+        missing_levels = state.get("missing_slots_by_level", {"L1": [], "L3": [], "others": []})
+        ambiguity_questions = state.get("ambiguity_questions", [])
         
         # 生成提示词
-        prompt = get_user_refinement_prompt(missing_slots)
+        prompt = get_user_refinement_prompt(
+            missing_levels.get("L1", []),
+            missing_levels.get("L3", []),
+            missing_levels.get("others", []),
+            ambiguity_questions
+        )
         
         # 调用LLM生成友好提示
         logger.info("生成用户交互提示...")
@@ -843,12 +990,22 @@ async def final_integration_node(
         
         constraint_summary = state.get("constraint_summary")
         preference_summary = state.get("preference_summary")
+        commute_summary = state.get("commute_summary")
+        transport_summary = state.get("transport_plan_summary")
+        transfer_summary = state.get("transfer_summary")
+        buffer_plan = state.get("buffer_plan")
+        multi_plan_summary = state.get("multi_plan_summary")
         # 生成提示词
         prompt = get_final_integration_prompt(
             current_slots,
             tool_results,
             constraint_summary,
-            preference_summary
+            preference_summary,
+            commute_summary,
+            transport_summary,
+            transfer_summary,
+            buffer_plan,
+            multi_plan_summary
         )
         
         # 调用LLM

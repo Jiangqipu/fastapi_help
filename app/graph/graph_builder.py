@@ -9,6 +9,7 @@ from app.graph.nodes import (
     slot_validation_node,
     time_constraint_node,
     preference_scoring_node,
+    transport_planning_node,
     user_refinement_node,
     task_decomposition_node,
     tool_execution_node,
@@ -79,6 +80,9 @@ def build_travel_planner_graph(
     async def wrap_preference_scoring_post(state: GraphState) -> GraphState:
         return await preference_scoring_node(state, storage)
     
+    async def wrap_transport_planning(state: GraphState) -> GraphState:
+        return await transport_planning_node(state, storage)
+    
     # 添加节点
     workflow.add_node("initial_input", initial_input_node)
     workflow.add_node("intent_decompose", wrap_intent_decompose)
@@ -91,6 +95,7 @@ def build_travel_planner_graph(
     workflow.add_node("result_validation", wrap_result_validation)
     workflow.add_node("post_time_constraint_check", wrap_time_constraint_post)
     workflow.add_node("post_preference_scoring", wrap_preference_scoring_post)
+    workflow.add_node("transport_planning", wrap_transport_planning)
     workflow.add_node("parameter_correction", wrap_parameter_correction)
     workflow.add_node("task_scheduler", task_scheduler_node)
     workflow.add_node("final_integration", wrap_final_integration)
@@ -157,7 +162,8 @@ def build_travel_planner_graph(
         }
     )
 
-    workflow.add_edge("post_preference_scoring", "task_scheduler")
+    workflow.add_edge("post_preference_scoring", "transport_planning")
+    workflow.add_edge("transport_planning", "task_scheduler")
     
     # 任务调度后的条件跳转
     def route_after_scheduler(state: GraphState) -> str:

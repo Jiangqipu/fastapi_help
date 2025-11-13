@@ -230,7 +230,12 @@ def get_final_integration_prompt(
     current_slots: Dict[str, Any],
     tool_results: Dict[str, Any],
     constraint_summary: Optional[str] = None,
-    preference_summary: Optional[str] = None
+    preference_summary: Optional[str] = None,
+    commute_summary: Optional[str] = None,
+    transport_summary: Optional[str] = None,
+    transfer_summary: Optional[str] = None,
+    buffer_plan: Optional[Dict[str, Any]] = None,
+    multi_plan_summary: Optional[str] = None,
 ) -> str:
     """
     生成最终结果整合的提示词
@@ -270,6 +275,21 @@ def get_final_integration_prompt(
 
 **软约束偏好评分：**
 {preference_summary or "暂无偏好信息"}
+
+**通勤估算：**
+{commute_summary or "尚未生成通勤估算"}
+
+**交通方案评分：**
+{transport_summary or "暂无交通方案评估"}
+
+**换乘与接驳计划：**
+{transfer_summary or "暂无换乘信息"}
+
+**缓冲建议：**
+{_format_buffer_plan(buffer_plan)}
+
+**多方案对比：**
+{multi_plan_summary or "暂无多方案对比。"}
 
 **输出要求：**
 1. 生成一份完整的出行规划方案，包括：
@@ -342,31 +362,42 @@ def get_parameter_correction_prompt(
     return prompt
 
 
-def get_user_refinement_prompt(missing_slots: List[str]) -> str:
+def get_user_refinement_prompt(
+    critical_slots: List[str],
+    optional_slots: List[str],
+    other_slots: List[str],
+    ambiguity_questions: List[str]
+) -> str:
     """
     生成用户交互提示的提示词
-    
-    Args:
-        missing_slots: 缺失的槽位列表
-    
-    Returns:
-        str: 完整的提示词
     """
-    missing_text = "、".join(missing_slots)
+    critical_text = "、".join(critical_slots) if critical_slots else "（无）"
+    optional_text = "、".join(optional_slots) if optional_slots else "（无）"
+    other_text = "、".join(other_slots) if other_slots else "（无）"
+    ambiguity_text = "\n".join(f"- {item}" for item in ambiguity_questions) if ambiguity_questions else "（无歧义问题）"
     
-    prompt = f"""根据缺失的槽位信息，生成一个友好、清晰的提示，引导用户补充信息。
+    prompt = f"""请根据以下分级信息，为用户生成一个友好、清晰的提示，引导其补充必要信息和澄清歧义。优先询问 L1 关键槽位，然后再询问可选槽位；若存在歧义问题，也请单独提出澄清。
 
-**缺失的槽位：**
-{missing_text}
+**L1 必填槽位：**
+{critical_text}
+
+**可选槽位：**
+{optional_text}
+
+**其他槽位：**
+{other_text}
+
+**歧义问题：**
+{ambiguity_text}
 
 **要求：**
-1. 使用友好、自然的语言
-2. 明确说明需要用户提供哪些信息
-3. 可以给出示例帮助用户理解
-4. 保持简洁，不要过于冗长
+1. 使用友好、自然的语言，逐条说明需要用户提供的信息。
+2. 先处理 L1，再处理可选槽位，最后提及歧义澄清。
+3. 对歧义问题给出示例，例如“请确认会议在北京哪个区或地标附近？”。
+4. 保持简洁，不要过于冗长。
 
 **输出格式：**
-直接输出提示文本，不需要JSON格式。"""
+直接输出中文提示文本，不需要JSON格式。"""
     
     return prompt
 
@@ -380,4 +411,18 @@ def _format_slots(slots: Dict[str, Any]) -> str:
     if not lines:
         return "  （暂无槽位信息）"
     return "\n".join(lines)
+
+
+def _format_buffer_plan(plan: Optional[Dict[str, Any]]) -> str:
+    if not plan:
+        return "暂无缓冲建议。"
+    min_buffer = plan.get("min_buffer")
+    max_buffer = plan.get("max_buffer")
+    suggestion = plan.get("suggestion", "")
+    parts = []
+    if min_buffer is not None and max_buffer is not None:
+        parts.append(f"推荐缓冲区间：{min_buffer}-{max_buffer} 分钟。")
+    if suggestion:
+        parts.append(suggestion)
+    return " ".join(parts) if parts else "暂无缓冲建议。"
 
