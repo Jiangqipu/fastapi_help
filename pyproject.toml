@@ -1,0 +1,19 @@
+[project]
+name = "fastapi-help"
+version = "0.1.0"
+description = "智能出行规划助手 - 基于LangGraph的多轮交互行程规划系统"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "langchain>=0.1.0",
+    "langchain-core>=0.1.0",
+    "langgraph>=0.0.20",
+    "langchain-openai>=0.0.2",
+    "redis>=5.0.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "httpx>=0.25.0",
+    "python-json-logger>=2.0.7",
+]
