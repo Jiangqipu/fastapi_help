@@ -1,6 +1,6 @@
 """LLM提示词模板"""
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 
@@ -228,7 +228,9 @@ def get_task_decomposition_prompt(current_slots: Dict[str, Any]) -> str:
 
 def get_final_integration_prompt(
     current_slots: Dict[str, Any],
-    tool_results: Dict[str, Any]
+    tool_results: Dict[str, Any],
+    constraint_summary: Optional[str] = None,
+    preference_summary: Optional[str] = None
 ) -> str:
     """
     生成最终结果整合的提示词
@@ -262,6 +264,12 @@ def get_final_integration_prompt(
 
 **工具查询结果：**
 {results_text}
+
+**时间可行性分析：**
+{constraint_summary or "暂无约束数据"}
+
+**软约束偏好评分：**
+{preference_summary or "暂无偏好信息"}
 
 **输出要求：**
 1. 生成一份完整的出行规划方案，包括：

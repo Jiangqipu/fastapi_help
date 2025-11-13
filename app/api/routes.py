@@ -120,11 +120,29 @@ async def create_travel_plan(
                 "final_plan_output": "",
                 "user_input": user_input,
                 "validation_result": None,
-                "current_subtask_index": 0
+                "current_subtask_index": 0,
+                "hard_time_constraints": [],
+                "soft_time_preferences": [],
+                "normalized_time_constraints": [],
+                "constraint_violation": False,
+                "constraint_violation_message": None,
+                "constraint_summary": None,
+                "preference_breakdown": [],
+                "preference_score": None,
+                "preference_summary": None
             }
         else:
             # 更新用户输入
             state["user_input"] = user_input
+            state.setdefault("hard_time_constraints", [])
+            state.setdefault("soft_time_preferences", [])
+            state.setdefault("normalized_time_constraints", [])
+            state.setdefault("constraint_violation", False)
+            state.setdefault("constraint_violation_message", None)
+            state.setdefault("constraint_summary", None)
+            state.setdefault("preference_breakdown", [])
+            state.setdefault("preference_score", None)
+            state.setdefault("preference_summary", None)
         
         # 添加动态指令（如果提供）
         if request.dynamic_instructions:

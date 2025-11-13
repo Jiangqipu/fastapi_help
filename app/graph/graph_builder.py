@@ -7,6 +7,8 @@ from app.graph.nodes import (
     initial_input_node,
     intent_decompose_node,
     slot_validation_node,
+    time_constraint_node,
+    preference_scoring_node,
     user_refinement_node,
     task_decomposition_node,
     tool_execution_node,
@@ -65,14 +67,30 @@ def build_travel_planner_graph(
     async def wrap_parameter_correction(state: GraphState) -> GraphState:
         return await parameter_correction_node(state, llm1, storage)
     
+    async def wrap_time_constraint(state: GraphState) -> GraphState:
+        return await time_constraint_node(state, storage)
+    
+    async def wrap_preference_scoring(state: GraphState) -> GraphState:
+        return await preference_scoring_node(state, storage)
+    
+    async def wrap_time_constraint_post(state: GraphState) -> GraphState:
+        return await time_constraint_node(state, storage)
+    
+    async def wrap_preference_scoring_post(state: GraphState) -> GraphState:
+        return await preference_scoring_node(state, storage)
+    
     # 添加节点
     workflow.add_node("initial_input", initial_input_node)
     workflow.add_node("intent_decompose", wrap_intent_decompose)
     workflow.add_node("slot_validation", wrap_slot_validation)
+    workflow.add_node("time_constraint_check", wrap_time_constraint)
+    workflow.add_node("preference_scoring", wrap_preference_scoring)
     workflow.add_node("user_refinement", wrap_user_refinement)
     workflow.add_node("task_decomposition", wrap_task_decomposition)
     workflow.add_node("tool_execution", wrap_tool_execution)
     workflow.add_node("result_validation", wrap_result_validation)
+    workflow.add_node("post_time_constraint_check", wrap_time_constraint_post)
+    workflow.add_node("post_preference_scoring", wrap_preference_scoring_post)
     workflow.add_node("parameter_correction", wrap_parameter_correction)
     workflow.add_node("task_scheduler", task_scheduler_node)
     workflow.add_node("final_integration", wrap_final_integration)
@@ -85,18 +103,32 @@ def build_travel_planner_graph(
     workflow.add_edge("initial_input", "intent_decompose")
     workflow.add_edge("intent_decompose", "slot_validation")
     
-    # 槽位校验后的条件跳转
-    def route_after_slot_validation(state: GraphState) -> str:
-        """根据槽位校验结果路由"""
-        is_complete = state.get("is_slots_complete", False)
-        if is_complete:
-            return "task_decomposition"
-        else:
-            return "user_refinement"
+    # 槽位校验后先进行时间约束检查
+    workflow.add_edge("slot_validation", "time_constraint_check")
+
+    def route_after_time_constraints(state: GraphState) -> str:
+        """根据时间约束与槽位结果路由"""
+        if state.get("constraint_violation"):
+            return "end"
+        return "preference_scoring"
     
     workflow.add_conditional_edges(
-        "slot_validation",
-        route_after_slot_validation,
+        "time_constraint_check",
+        route_after_time_constraints,
+        {
+            "preference_scoring": "preference_scoring",
+            "end": "end"
+        }
+    )
+
+    def route_after_preference_scoring(state: GraphState) -> str:
+        if state.get("is_slots_complete", False):
+            return "task_decomposition"
+        return "user_refinement"
+
+    workflow.add_conditional_edges(
+        "preference_scoring",
+        route_after_preference_scoring,
         {
             "task_decomposition": "task_decomposition",
             "user_refinement": "user_refinement"
@@ -109,7 +141,23 @@ def build_travel_planner_graph(
     # 任务分解后的流程
     workflow.add_edge("task_decomposition", "tool_execution")
     workflow.add_edge("tool_execution", "result_validation")
-    workflow.add_edge("result_validation", "task_scheduler")
+    workflow.add_edge("result_validation", "post_time_constraint_check")
+
+    def route_after_post_constraints(state: GraphState) -> str:
+        if state.get("constraint_violation"):
+            return "end"
+        return "post_preference_scoring"
+
+    workflow.add_conditional_edges(
+        "post_time_constraint_check",
+        route_after_post_constraints,
+        {
+            "post_preference_scoring": "post_preference_scoring",
+            "end": "end"
+        }
+    )
+
+    workflow.add_edge("post_preference_scoring", "task_scheduler")
     
     # 任务调度后的条件跳转
     def route_after_scheduler(state: GraphState) -> str:

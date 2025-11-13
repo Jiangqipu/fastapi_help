@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # 会话过期时间（秒）
     session_ttl: int = 3600
     
+    # 时间约束计算默认值
+    default_travel_duration_minutes: int = 120  # 默认行程耗时
+    minimum_departure_buffer_minutes: int = 15  # 最小出发缓冲
+    default_activity_duration_minutes: int = 30  # 默认单个活动时长
+    default_activity_buffer_minutes: int = 15  # 活动之间最小缓冲
+
     # MCP工具配置（SSE格式）
     # 12306火车票查询工具
     mcp_train_server_url: Optional[str] = None

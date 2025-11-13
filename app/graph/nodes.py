@@ -17,6 +17,19 @@ from app.prompts import (
 from app.tools import BaseMCPTool, TrainQueryTool, MapQueryTool, HotelQueryTool
 from app.storage import RedisStorage
 from app.config import settings
+from app.utils.time_window import (
+    normalize_time_constraints,
+    summarize_constraint_violations,
+    extract_tool_time_stats,
+    apply_schedule_propagation,
+    build_constraint_summary,
+    evaluate_soft_preferences,
+    build_preference_summary,
+)
+from app.utils.constraint_parser import (
+    merge_constraint_records,
+    parse_time_constraints,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +197,23 @@ async def initial_input_node(state: GraphState) -> GraphState:
     })
     
     state["dialog_history"] = dialog_history
+
+    # 时间约束解析
+    hard_constraints = state.get("hard_time_constraints", [])
+    soft_preferences = state.get("soft_time_preferences", [])
+    parsed_hard, parsed_soft = parse_time_constraints(user_input)
+    if parsed_hard:
+        hard_constraints = merge_constraint_records(hard_constraints, parsed_hard)
+        state["hard_time_constraints"] = hard_constraints
+        logger.info(f"解析到 {len(parsed_hard)} 条硬性时间约束")
+    else:
+        state.setdefault("hard_time_constraints", hard_constraints)
+    if parsed_soft:
+        soft_preferences = merge_constraint_records(soft_preferences, parsed_soft, unique_field="source_text")
+        state["soft_time_preferences"] = soft_preferences
+        logger.info(f"解析到 {len(parsed_soft)} 条软性时间偏好")
+    else:
+        state.setdefault("soft_time_preferences", soft_preferences)
     
     logger.info(f"用户输入已接收：user_id={user_id}, input={user_input[:50]}...")
     return state
@@ -265,6 +295,82 @@ async def slot_validation_node(
         # 错误时标记为不完整
         state["is_slots_complete"] = False
         state["missing_slots"] = ["validation_error"]
+        return state
+
+
+async def time_constraint_node(
+    state: GraphState,
+    storage: RedisStorage
+) -> GraphState:
+    """时间约束标准化与可行性检查"""
+    try:
+        constraints = state.get("hard_time_constraints", [])
+        if not constraints:
+            state["normalized_time_constraints"] = []
+            state["constraint_violation"] = False
+            state["constraint_violation_message"] = None
+            state["constraint_summary"] = "尚未收集到硬性时间约束。"
+            await storage.save_state(state["user_id"], state)
+            return state
+
+        tool_results = state.get("tool_results", {})
+        timing_stats = extract_tool_time_stats(tool_results)
+
+        normalized, violations = normalize_time_constraints(constraints)
+        normalized, propagation_violations = apply_schedule_propagation(
+            normalized, timing_stats
+        )
+        violations.extend(propagation_violations)
+        state["normalized_time_constraints"] = normalized
+        state["constraint_summary"] = build_constraint_summary(normalized)
+
+        if violations:
+            message = summarize_constraint_violations(violations)
+            state["constraint_violation"] = True
+            state["constraint_violation_message"] = message
+            state["final_plan_output"] = message
+            state["validation_result"] = {
+                "is_valid": False,
+                "reason": message
+            }
+            logger.warning(f"时间约束不可行：{message}")
+        else:
+            state["constraint_violation"] = False
+            state["constraint_violation_message"] = None
+            if not state.get("constraint_summary"):
+                state["constraint_summary"] = "所有硬性时间约束均可行。"
+
+        await storage.save_state(state["user_id"], state)
+        return state
+
+    except Exception as e:
+        logger.error(f"时间约束检查失败：{str(e)}", exc_info=True)
+        return state
+
+
+async def preference_scoring_node(
+    state: GraphState,
+    storage: RedisStorage
+) -> GraphState:
+    """软约束评分节点"""
+    try:
+        if state.get("constraint_violation"):
+            state["preference_breakdown"] = []
+            state["preference_score"] = None
+            state["preference_summary"] = None
+            await storage.save_state(state["user_id"], state)
+            return state
+
+        preferences = state.get("soft_time_preferences", [])
+        constraints = state.get("normalized_time_constraints", [])
+        breakdown, aggregate = evaluate_soft_preferences(preferences, constraints)
+        state["preference_breakdown"] = breakdown
+        state["preference_score"] = aggregate
+        state["preference_summary"] = build_preference_summary(breakdown, aggregate)
+        await storage.save_state(state["user_id"], state)
+        return state
+    except Exception as e:
+        logger.error(f"软约束评分失败：{str(e)}", exc_info=True)
         return state
 
 
@@ -735,8 +841,15 @@ async def final_integration_node(
         current_slots = state.get("current_slots", {})
         tool_results = state.get("tool_results", {})
         
+        constraint_summary = state.get("constraint_summary")
+        preference_summary = state.get("preference_summary")
         # 生成提示词
-        prompt = get_final_integration_prompt(current_slots, tool_results)
+        prompt = get_final_integration_prompt(
+            current_slots,
+            tool_results,
+            constraint_summary,
+            preference_summary
+        )
         
         # 调用LLM
         logger.info("开始最终结果整合...")
